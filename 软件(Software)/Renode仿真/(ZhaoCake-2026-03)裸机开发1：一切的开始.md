@@ -148,7 +148,25 @@ loop_forever:
 1. **`MEMORY` 块**：
    - 这里定义了硬件的物理特性。`flash` 起始于 `0x20000000`（执行代码的地方），`ram` 起始于 `0x80000000`（存储变量的地方）。
 2. **`AT > flash`**：
-   - 这是链接脚本中最精妙的地方。`.data` 段（已初始化的全局变量）的 **运行时地址 (VMA)** 在 RAM 中，但其 **加载地址 (LMA)** 在 Flash 中。这意味着变量的初始值被烧录在 Flash 里，程序启动时需要被搬运到 RAM。
+   - 这个关键字不是“仅仅做个标记给人看”，而是链接器用来确定**加载地址 (LMA)** 的语义指令。通常你只告诉链接器变量在运行时应该放哪里（VMA）；`AT` 让它额外记录一个物理镜像地址供输出文件使用。
+   - **为什么它必要？**
+     * `.data` 段的内容要烧录到 Flash 才能保存断电前的初始值。
+     * 但是运行时这些变量必须驻留在 RAM 才能读写——因此 VMA 指向 RAM、LMA 指向 Flash。链接器通过 `AT` 把这两个地址“绑”在一起并在生成的二进制中写入初值数据。
+   - **没有 `AT` 会怎样？**
+     * 链接器默认 `LMA = VMA`，也就是把数据初值直接放在 RAM 的位置上。
+     * 烧录镜像并上电后，RAM 本身不含初值，只有一堆垃圾。启动汇编即便执行了搬运循环，也找不到任何合法的源地址（因为链接器没把初值放到 Flash），所以变量最终依旧是随机的。
+     * 换句话说，“没有 `AT`”时你仍可以写汇编搬运，但搬运路径根本不存在。
+   - **实际效果演示**：
+     ```c
+     .data : {
+         _sdata = .;
+         *(.data*)
+         _edata = .;
+     } > ram AT > flash
+     _sidata = LOADADDR(.data);   /* 等同于 LMA */
+     ```
+     在汇编中，你应从 `_sidata`（Flash 中的初值）拷贝到 `_sdata.._edata`（RAM）。
+   - 这也解释了 `startup.s` 中 `loop_copy_data` 需要读取 `_etext`／`_sidata`：那正是由 `AT` 定义的镜像地址。
 3. **符号导出**：
    - `_sdata`、`_edata`、`_sbss` 等符号并不占用内存空间，它们只是一个**地址标记**。汇编代码通过这些标记知道从哪里开始搬运数据，搬运多少。
 
@@ -173,14 +191,39 @@ loop_forever:
 
 ### 1. 默认链接脚本是从哪来的？
 当你运行 `gcc` 链接程序时，它其实调用了链接器 `ld`。链接器内置了一套默认的链接脚本，以适应当前操作系统的内存模型（如 ELF 格式）。
-*   **如何查看：** 你可以运行以下命令来导出编译器当前的默认链接脚本：
+**如何查看：** 你可以运行以下命令来导出编译器当前的默认链接脚本：
 
-    ```bash
-    ld --verbose
-    # 或者对于交叉编译器
-    riscv64-unknown-elf-ld --verbose
-    ```
-    你会看到一大段复杂的脚本，它规定了代码段起始地址（通常是 0x400000 左右）以及各种动态链接库的需求。
+```bash
+ld --verbose
+# 或者对于交叉编译器
+riscv64-unknown-elf-ld --verbose
+```
+
+```bash
+renode_space/stage10_basic on main !?⇣1 via nix impure ❯ riscv32-none-elf-ld --verbose | head -n 30
+GNU ld (GNU Binutils) 2.44
+  Supported emulations:
+   elf32lriscv
+   elf64lriscv
+   elf32briscv
+   elf64briscv
+using internal linker script:
+==================================================
+/* Script for -z combreloc */
+/* Copyright (C) 2014-2025 Free Software Foundation, Inc.
+   Copying and distribution of this script, with or without modification,
+   are permitted in any medium without royalty provided the copyright
+   notice and this notice are preserved.  */
+OUTPUT_FORMAT("elf32-littleriscv", "elf32-littleriscv", "elf32-littleriscv")
+OUTPUT_ARCH(riscv)
+ENTRY(_start)
+SECTIONS
+{
+  /* Read-only sections, merged into text segment: */
+  PROVIDE (__executable_start = SEGMENT_START("text-segment", 0x10000));
+```
+
+你会看到一大段复杂的脚本，它规定了代码段起始地址（x86通常是 0x400000 左右）以及各种动态链接库的需求。
 
 ### 2. 启动代码是谁提供的？
 
